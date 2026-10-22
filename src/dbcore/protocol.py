@@ -206,11 +206,23 @@ def ok(mcp: str, tool: str, **kw: Any) -> Result:
     return Result(ok=True, mcp=mcp, tool=tool, **kw)
 
 
-def fail(mcp: str, tool: str, exc: Exception | ToolError, **kw: Any) -> Result:
-    e = exc if isinstance(exc, ToolError) else ToolError("E_ARGS", str(exc))
+def fail(mcp: str, tool: str, exc: Exception | ToolError, code: str = "E_ARGS",
+         **kw: Any) -> Result:
+    """把异常转成失败信封。
+
+    非 ToolError 的 fallback 码由调用方指定：MCP 外壳兜底捕到的任意异常是**工具执行
+    期异常**（E_QUERY），不是参数错误 —— 默认 E_ARGS 会让"代码崩了"看起来像
+    "用户传错了"，误导排障方向。
+    """
+    if isinstance(exc, ToolError):
+        e = exc
+    else:
+        # 非 ToolError 是代码缺陷或环境问题，带上类型名才能定位是哪一类
+        e = ToolError(code, str(exc), type=type(exc).__name__)
+    summary = kw.pop("summary", None) or e.message
     return Result(
         ok=False, mcp=mcp, tool=tool, verdict="unknown", confidence="low",
-        error=e.to_dict(), summary=e.message, **kw,
+        error=e.to_dict(), summary=summary, **kw,
     )
 
 

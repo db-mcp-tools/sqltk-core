@@ -10,10 +10,12 @@
   执行计划归一  plan
   结果渲染      report
   日志          logging_setup
+  MCP 外壳      mcp_kit      （不在此处 re-export：它按需导入 mcp SDK，
+                              顶层引入会让纯库调用方被迫安装 MCP 依赖）
 
 约束：
-  1. 除 sqlglot 外不引入重依赖；数据库驱动（pymysql / psycopg）为可选依赖，
-     缺失时给清晰报错而不是崩溃；
+  1. 除 sqlglot 外不引入重依赖；数据库驱动（pymysql / psycopg）与 MCP SDK 都是
+     可选依赖（extra），缺失时给清晰报错而不是崩溃；
   2. 任何对目标库的连接必须是只读会话 + 语句超时 + 单语句；
   3. 本包**不知道**任何具体 MCP 的业务，业务判断一律留在各自 MCP 仓库。
 """
