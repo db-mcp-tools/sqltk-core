@@ -1,17 +1,21 @@
 """MCP 运行时外壳 —— 把 dbcore 的 Result 协议接到 MCP SDK 上。
 
-职责只有三条：
+职责四条：
 
   1. 兼容 MCP SDK 1.x（`FastMCP`）与 2.x（`MCPServer`）—— 两个版本入口不同
   2. 把工具函数的返回值包成 `dbt.result/v1` 信封（Result → dict）
   3. **任何异常都变成 ok=false 的信封**，绝不让工具异常拖垮 MCP 会话
+  4. `cli()`：同一个入口既当 stdio server，也当命令行调试口（`tools` / `call`）
 
 用法：
 
-    from dbcore.mcp_kit import make_server, register
+    from dbcore.mcp_kit import cli, make_server, register
 
     mcp = make_server("sql-review", __version__)
     register(mcp, "sql-review", my_tool)
+
+    def main() -> int:
+        return cli("sql-review", TOOLS, mcp)
 
 为什么放在 dbcore 而不是独立包：
     它只依赖本包的 protocol，且是每个 MCP 都要用的横切适配层。
@@ -103,3 +107,100 @@ def register(mcp: Any, mcp_name: str, func: Callable, tool_name: str | None = No
     except TypeError:                                       # 部分版本要求显式 name
         mcp.tool(name=tool_name or func.__name__)(wrapped)
     return wrapped
+
+
+# ------------------------------------------------------------------
+# 命令行入口
+# ------------------------------------------------------------------
+
+USAGE = """\
+用法：
+  {cmd}                              起 stdio server（MCP 客户端就是这么调的）
+  {cmd} tools [--json]               列出全部工具
+  {cmd} call <工具名> --args '<json>' 本地调一次，打印 dbt.result/v1 信封
+
+例：
+  {cmd} tools
+  {cmd} call list_rules --args '{{}}'
+  {cmd} call review_sql --args '{{"sql": "SELECT * FROM t WHERE 1=1"}}'
+
+退出码：0 = ok，1 = 工具返回 ok=false，2 = 用法错误。
+"""
+
+
+def cli(mcp_name: str, tools: dict[str, Callable], mcp: Any = None,
+        argv: list[str] | None = None) -> int:
+    """MCP 进程的命令行入口。
+
+    为什么需要：各仓 README 都写着「命令行调试（不挂客户端也能用）：
+    `mcp-sql-review tools` / `call <tool> --args ...`」，但入口只有一句
+    `mcp.run()` —— argv 被完全忽略，敲 `tools` 实际是起了一个等待 stdin 的
+    server，终端看起来就是卡死。文档承诺的东西必须真的存在。
+
+    实现放在 mcp_kit 而不是每个仓各写一份：6 个 MCP 的差别只有名字和工具表。
+    """
+    import inspect
+    import json
+    import sys
+
+    args = list(sys.argv[1:] if argv is None else argv)
+
+    def usage(code_ok: bool = False) -> int:
+        prog = "python -m " + mcp_name.replace("-", "_")
+        print(USAGE.format(cmd=prog), end="")
+        return 0 if code_ok else 2
+
+    # 无参数 = 正常起 server。以 - 开头的是 SDK 自己的开关（如 --transport stdio），
+    # 原样交给 mcp.run()，不要抢它的参数。
+    if not args or (args[0].startswith("-") and args[0] not in ("-h", "--help")):
+        if mcp is None:
+            print("没有可运行的 server 实例", file=sys.stderr)
+            return 2
+        mcp.run()
+        return 0
+
+    sub = args[0]
+    if sub in ("help", "-h", "--help"):
+        return usage(code_ok=True)
+
+    if sub == "tools":
+        items = sorted(tools.items())
+        if "--json" in args:
+            print(json.dumps(
+                [{"tool": n, "doc": (inspect.getdoc(f) or "").splitlines()[0]
+                  if inspect.getdoc(f) else ""} for n, f in items],
+                ensure_ascii=False, indent=2))
+            return 0
+        print(f"[{mcp_name}] {len(items)} 个工具\n")
+        for name, fn in items:
+            doc = (inspect.getdoc(fn) or "").splitlines()
+            print(f"  {name:26s} {doc[0] if doc else ''}")
+        return 0
+
+    if sub == "call":
+        rest = args[1:]
+        if not rest:
+            print("缺少工具名。用法：call <工具名> --args '<json>'\n", file=sys.stderr)
+            return usage()
+        name = rest[0]
+        if name not in tools:
+            print(f"未知工具 {name!r}。可用的有：{', '.join(sorted(tools))}", file=sys.stderr)
+            return 2
+        payload: dict = {}
+        if "--args" in rest:
+            i = rest.index("--args")
+            raw = rest[i + 1] if i + 1 < len(rest) else ""
+            try:
+                payload = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError as exc:
+                print(f"--args 不是合法 JSON：{exc}", file=sys.stderr)
+                return 2
+            if not isinstance(payload, dict):
+                print("--args 必须是 JSON 对象", file=sys.stderr)
+                return 2
+        out = wrap(mcp_name, name)(tools[name])(**payload)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0 if out.get("ok") else 1
+
+    print(f"未知子命令 {sub!r}\n", file=sys.stderr)
+    return usage()

@@ -99,6 +99,51 @@ except ImportError:
 if _err is None:
     check("mcp 依赖可用（make_server 未走降级路径）", True)
 
+
+# 8. 命令行入口 cli()
+# 各仓 README 都写着 `mcp-xxx tools` / `call <tool> --args ...`，
+# 但很长一段时间入口只有 mcp.run()，敲 tools 实际是起了一个等 stdin 的 server
+# —— 终端看着就是卡死。这条用例钉住「文档里承诺的子命令真的存在」。
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+
+CLI_TOOLS = {"ok_tool": ok_tool.__wrapped__, "raw": raw.__wrapped__}
+
+
+def run_cli(argv: list[str]) -> tuple[int, str]:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+        code = kit.cli("kit-test", CLI_TOOLS, None, argv)
+    return code, buf.getvalue()
+
+
+_code, _out = run_cli(["tools"])
+check("cli tools 退出 0", _code == 0)
+check("cli tools 列出工具名", "ok_tool" in _out and "raw" in _out, _out[:120])
+check("cli tools 带工具数量", "2 个工具" in _out, _out[:80])
+
+_code, _out = run_cli(["tools", "--json"])
+check("cli tools --json 是合法 JSON", json.loads(_out)[0]["tool"] in CLI_TOOLS)
+
+
+@kit.wrap("kit-test", "boom")
+def boom() -> Result:
+    raise ToolError("E_ARGS", "参数不对")
+
+
+CLI_TOOLS["boom"] = boom.__wrapped__
+_code, _out = run_cli(["call", "ok_tool", "--args", '{"x": 7}'])
+check("cli call 打印信封", json.loads(_out)["data"] == {"x": 7})
+check("cli call 成功退出 0", _code == 0)
+_code, _out = run_cli(["call", "boom", "--args", "{}"])
+check("cli call 工具报错时退出 1", _code == 1, str(_code))
+check("cli call 仍打印信封（错误码可查）", json.loads(_out)["error"]["code"] == "E_ARGS")
+check("cli call 未知工具退出 2", run_cli(["call", "nope"])[0] == 2)
+check("cli call 非法 JSON 退出 2", run_cli(["call", "ok_tool", "--args", "{oops"])[0] == 2)
+check("cli 未知子命令退出 2", run_cli(["nonsense"])[0] == 2)
+check("cli --help 退出 0", run_cli(["--help"])[0] == 0)
+
 print("\n" + "=" * 60)
 print("通过 %d 项，失败 %d 项" % (len(PASSED), len(FAILED)))
 if FAILED:
