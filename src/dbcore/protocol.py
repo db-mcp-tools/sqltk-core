@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -96,6 +97,26 @@ class Evidence:
         return {k: v for k, v in asdict(self).items() if v != "" or k in ("kind", "source", "fact")}
 
 
+# next_actions 会随工具返回值一起交给调用方（进 LLM 上下文、日志、编排 trace）。
+# 连接串一旦原样带出去，生产库密码就跟着泄漏了。在这里统一脱敏，
+# 而不是指望每个工具作者记得调 redact_dsn —— 事实上之前一个都没调。
+SENSITIVE_ARG_KEYS = (
+    "url", "dsn", "connection", "conn", "conn_str",
+    "connection_string", "dsn_str", "database_url",
+)
+
+
+def _scrub_arg(v: str) -> str:
+    """把连接串里的凭据抹掉。对"密码含未转义 @"这种写法也要兜住。"""
+    from dbcore.ids import redact_dsn
+
+    out = redact_dsn(v)
+    # redact_dsn 只掩第一段 userinfo；userinfo 段不含 "/"，所以到最后一个 @ 为止都算凭据
+    if "://" in out:
+        out = re.sub(r"(?<=://)[^/\s]*@", "***@", out)
+    return out
+
+
 @dataclass
 class NextAction:
     mcp: str
@@ -143,10 +164,17 @@ class Result:
         return self
 
     def next(self, mcp: str, tool: str, **kw: Any) -> "Result":
-        """登记下一步建议调用的工具（跨 MCP 也允许）。"""
+        """登记下一步建议调用的工具（跨 MCP 也允许）。
+
+        连接串类参数在这里统一脱敏，见 SENSITIVE_ARG_KEYS。
+        注意：脱敏后的 url 不能再用来真实连接 —— 下一步应改用 instance_id 定位实例。
+        """
         reason = kw.pop("reason", "")
         priority = kw.pop("priority", 5)
         optional = kw.pop("optional", True)
+        for k in SENSITIVE_ARG_KEYS:
+            if isinstance(kw.get(k), str):
+                kw[k] = _scrub_arg(kw[k])
         self.next_actions.append(NextAction(mcp, tool, kw, reason, priority, optional))
         return self
 
@@ -160,7 +188,6 @@ class Result:
         d["ts"] = int(time.time())
         d["evidence"] = [e.to_dict() if hasattr(e, "to_dict") else e for e in self.evidence]
         d["next_actions"] = [a.to_dict() if hasattr(a, "to_dict") else a for a in self.next_actions]
-        d.pop("took_ms", None) or None
         d["took_ms"] = self.took_ms
         ordered = [
             "ok", "schema", "mcp", "tool", "version", "ts", "took_ms",

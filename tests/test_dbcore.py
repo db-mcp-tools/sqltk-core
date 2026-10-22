@@ -75,6 +75,52 @@ check("verdict 取最坏", worst_verdict(["pass", "warn", "fail"]) == "fail")
 check("correlation_id 递增", new_correlation_id() != new_correlation_id())
 
 # ==================================================================
+# 事务可回滚性判定（AST 而非字符串前缀）
+# ==================================================================
+from dbcore.guard import is_ddl, unsafe_in_transaction  # noqa: E402
+
+# 回归：`/* 注记 */ ALTER TABLE` 曾让 startswith 判断失效，导致 MySQL 上
+# DDL 隐式提交后仍报告"已 ROLLBACK、数据未变更"。
+check("注释开头的 DDL 被识别为不可回滚",
+      unsafe_in_transaction("/* 运维注记 */ ALTER TABLE t ADD COLUMN c INT", "mysql") is not None)
+check("注释开头的 DDL 被 is_ddl 判定为真",
+      is_ddl("/* x */ CREATE INDEX i ON t(a)", "mysql"))
+check("行内注释的 DDL 被识别",
+      unsafe_in_transaction("# note\nALTER TABLE t ADD c INT", "mysql") is not None)
+check("纯 DML 允许进入事务",
+      unsafe_in_transaction("UPDATE t SET a=1 WHERE id=1", "mysql") is None)
+check("INSERT 允许进入事务",
+      unsafe_in_transaction("INSERT INTO t(a) VALUES(1)", "mysql") is None)
+check("DELETE 允许进入事务",
+      unsafe_in_transaction("DELETE FROM t WHERE id=1", "mysql") is None)
+for _s in ("TRUNCATE TABLE t", "OPTIMIZE TABLE t", "GRANT SELECT ON d.* TO u",
+           "CALL p()", "SET autocommit=1"):
+    check(f"非事务安全语句被拒：{_s[:20]}", unsafe_in_transaction(_s, "mysql") is not None)
+check("多条语句拒绝整体回滚承诺",
+      unsafe_in_transaction("UPDATE t SET a=1; DELETE FROM t", "mysql") is not None)
+check("普通 SELECT 不是 DDL", not is_ddl("SELECT 1 FROM t", "mysql"))
+
+# ==================================================================
+# 协议层脱敏：next_actions 会进 LLM 上下文，连接串必须在这里就抹掉
+# ==================================================================
+_r = Result(ok=True, mcp="m", tool="t")
+_r.next("m", "dry_run_change", url="mysql://root:S3cretPwd@10.0.0.1:3306/prod", dialect="mysql")
+_next_url = _r.to_dict()["next_actions"][0]["args"]["url"]
+check("next_actions 的 url 已脱敏", "S3cretPwd" not in _next_url, _next_url)
+check("脱敏后仍保留主机与库名", "10.0.0.1" in _next_url and "prod" in _next_url, _next_url)
+
+# 回归：密码含未转义 @ 时，只掩第一段会漏掉后半截
+_r2 = Result(ok=True, mcp="m", tool="t")
+_r2.next("m", "x", url="mysql://root:p@ss@10.0.0.1:3306/prod")
+_next_url2 = _r2.to_dict()["next_actions"][0]["args"]["url"]
+check("密码含 @ 时也不残留", "ss@" not in _next_url2 and "p@" not in _next_url2, _next_url2)
+
+_r3 = Result(ok=True, mcp="m", tool="t")
+_r3.next("m", "x", instance_id="i:mysql:abc", dialect="mysql")
+check("非敏感参数不被改写", _r3.to_dict()["next_actions"][0]["args"]["instance_id"] == "i:mysql:abc")
+check("took_ms 仍在信封里", "took_ms" in Result(ok=True, mcp="m", tool="t").to_dict())
+
+# ==================================================================
 
 
 # ==================================================================

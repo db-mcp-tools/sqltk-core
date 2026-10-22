@@ -11,7 +11,8 @@ import re
 import time
 
 from dbcore.dialect import normalize_dialect
-from dbcore.guard import assert_readonly
+from dbcore.guard import assert_readonly, unsafe_in_transaction
+from dbcore.protocol import ToolError
 
 DEFAULT_TIMEOUT = int(os.environ.get("DBT_QUERY_TIMEOUT", "10"))
 MAX_ROWS = int(os.environ.get("DBT_MAX_ROWS", "1000"))
@@ -256,6 +257,20 @@ def run_in_transaction(
     timeout = timeout_s or DEFAULT_TIMEOUT
     started = time.time()
     results: list[dict] = []
+
+    # 纵向防御：commit=False 意味着调用方指望"执行完能回滚干净"。这条保证必须由
+    # 库自己给出，不能依赖调用方先做对类型判断 —— 上层一个前缀匹配漏掉注释，
+    # 这里就会变成"改完库还告诉用户没改"。
+    if not commit:
+        for st in statements:
+            why = unsafe_in_transaction(st, d)
+            if why:
+                raise ToolError(
+                    "E_PERMISSION",
+                    f"dry-run 拒绝执行：{why}。"
+                    f"这类语句请改用影子表 / 备份恢复方案验证，不要用事务回滚假装安全",
+                    statement=st[:200],
+                )
 
     conn = _connect(spec)
     try:
