@@ -4,7 +4,7 @@
 这一层的价值只有一条：**工具抛异常不许拖垮 MCP 会话**。测试只盯这条，
 外加"结果信封字段齐全"和"错误码不误导"。
 
-（原 dbt-mcp-kit 套件，合并进 dbt-core 后保留全部用例。）
+（原 dbt-mcp-kit 套件，合并进 sqltk-core 后保留全部用例。）
 """
 
 from __future__ import annotations

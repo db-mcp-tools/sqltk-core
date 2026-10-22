@@ -21,7 +21,7 @@
 为什么 mcp 是延迟导入：
     `dbcore` 同时服务于**非 MCP** 场景（如 change_risk 只做风险评估不暴露工具）。
     若在模块顶层 `import mcp`，这些场景会被迫安装 MCP SDK。
-    真正的依赖声明在 `dbt-core[mcp]` 这个 extra 里。
+    真正的依赖声明在 `sqltk-core[mcp]` 这个 extra 里。
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ def _server_cls() -> Any:
             from mcp.server.fastmcp import FastMCP as cls  # type: ignore
         except ImportError as exc:         # pragma: no cover
             raise ImportError(
-                "未安装 MCP 依赖。执行：pip install \"dbt-core[mcp]\""
+                "未安装 MCP 依赖。执行：pip install \"sqltk-core[mcp]\""
             ) from exc
     _SERVER_CLS = cls
     return cls

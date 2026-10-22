@@ -1,14 +1,36 @@
+# 本文件由 scripts/gen-pyprojects.py 从 scripts/repo_config.py 生成，不要手改。
+# 改元数据请改 repo_config.py 后重跑：python scripts/gen-pyprojects.py
+
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dbt-core"
+name = "sqltk-core"
 version = "0.2.0"
-description = "SQL 工具链运行时内核：dbt.result/v1 协议信封、方言归一、SQL 指纹、只读连库、AST 结构化、执行计划归一。不含任何 MCP 业务判断。"
+description = "SQL 工具链运行时内核：dbt.result/v1 协议信封、方言归一、SQL 指纹、只读连库、AST 结构化、执行计划归一、MCP 运行时外壳。不含任何 MCP 业务判断。"
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = "Proprietary"}
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "罗文星", email = "1172566410@qq.com" }]
+maintainers = [{ name = "罗文星", email = "1172566410@qq.com" }]
+keywords = ["database", "sql", "dba", "database-tooling", "llm", "mcp", "sqlglot", "sql-parser", "sql-dialect", "sql-fingerprint"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 
 dependencies = [
     "sqlglot>=25.0",
@@ -21,8 +43,21 @@ postgres = ["psycopg[binary]>=3.1"]
 oracle = ["oracledb>=2.0"]
 all = ["mcp>=1.0", "pymysql>=1.1", "psycopg[binary]>=3.1", "oracledb>=2.0"]
 
+[project.urls]
+Homepage = "https://github.com/YOUR_GH_OWNER/sqltk-core"
+Repository = "https://github.com/YOUR_GH_OWNER/sqltk-core"
+Issues = "https://github.com/YOUR_GH_OWNER/sqltk-core/issues"
+Changelog = "https://github.com/YOUR_GH_OWNER/db-ai-toolchain/blob/main/CHANGELOG.md"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 "*" = ["py.typed", "*.yaml", "*.yml", "*.json"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["F", "E9"]
