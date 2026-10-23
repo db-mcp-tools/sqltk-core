@@ -1,6 +1,7 @@
 """安全连接：只读会话 + 语句超时 + 行数上限。
 
-驱动为可选依赖，缺失时抛出清晰的安装提示而不是 ImportError 栈。
+驱动为可选依赖（mysql=PyMySQL，postgres=psycopg），缺失时抛出清晰的安装提示
+而不是 ImportError 栈。SQLite 走标准库，零额外依赖，本地/嵌入式/测试场景开箱即用。
 所有对目标库的语句都必须先过 dbcore.guard 的只读护栏。
 """
 
@@ -29,10 +30,32 @@ class MissingDriver(Exception):
 
 class ConnectionSpec:
     def __init__(self, url: str):
+        self.url = url
+        # SQLite 是标准库，零额外依赖；连接串形如：
+        #   sqlite:///abs/path.db   （绝对路径，/ 后跟盘符 C:/ 即 Windows 绝对路径）
+        #   sqlite://rel.db         （相对路径）
+        #   sqlite://:memory:      （内存库）
+        if url.startswith("sqlite://"):
+            self.driver = "sqlite"
+            rest = url[len("sqlite://"):]
+            if rest == ":memory:":
+                self.database = ":memory:"
+            elif rest.startswith("/") and len(rest) > 2 and rest[2] == ":":
+                # sqlite:///C:/path/db.sqlite -> C:/path/db.sqlite
+                self.database = rest[1:]
+            else:
+                self.database = rest
+            self.user = ""
+            self.password = ""
+            self.host = ""
+            self.port = 0
+            return
         m = _URL_RE.match(url.strip())
         if not m:
-            raise ValueError("无法解析连接串，期望 mysql://user:pass@host:3306/db 或 postgres://...")
-        self.url = url
+            raise ValueError(
+                "无法解析连接串，期望 mysql://user:pass@host:3306/db、"
+                "postgres://user:pass@host:5432/db 或 sqlite:///path/db.sqlite"
+            )
         self.driver = normalize_dialect(m.group("scheme"))
         self.user = m.group("user") or ""
         self.password = m.group("password") or ""
@@ -42,10 +65,16 @@ class ConnectionSpec:
 
     @property
     def instance_id(self) -> str:
+        if self.driver == "sqlite":
+            return f"sqlite://{self.database}"
         return f"{self.driver}://{self.host}:{self.port}/{self.database}"
 
 
 def _connect(spec: ConnectionSpec):
+    if spec.driver == "sqlite":
+        import sqlite3  # 标准库，零额外依赖
+
+        return sqlite3.connect(spec.database)
     if spec.driver == "mysql":
         try:
             import pymysql  # type: ignore
@@ -90,25 +119,25 @@ def run_readonly(url: str, sql: str, dialect: str | None = None, max_rows: int =
 
     conn = _connect(spec)
     try:
-        with conn.cursor() as cur:
-            if spec.driver == "postgres":
-                cur.execute("SET TRANSACTION READ ONLY")
-                cur.execute("SET LOCAL statement_timeout = %s", (DEFAULT_TIMEOUT * 1000,))
-            cur.execute(sql)
-            if cur.description is None:
-                return {"instance_id": spec.instance_id, "columns": [], "rows": [], "truncated": False}
-            cols = [c[0] for c in cur.description]
-            raw = cur.fetchall()
-            limited = raw[:max_rows]
-            rows = []
-            for r in limited:
-                rows.append([v if isinstance(v, (str, int, float, type(None))) else str(v) for v in r])
-            return {
-                "instance_id": spec.instance_id,
-                "columns": cols,
-                "rows": rows,
-                "truncated": len(raw) > len(limited),
-            }
+        cur = conn.cursor()
+        if spec.driver == "postgres":
+            cur.execute("SET TRANSACTION READ ONLY")
+            cur.execute("SET LOCAL statement_timeout = %s", (DEFAULT_TIMEOUT * 1000,))
+        cur.execute(sql)
+        if cur.description is None:
+            return {"instance_id": spec.instance_id, "columns": [], "rows": [], "truncated": False}
+        cols = [c[0] for c in cur.description]
+        raw = cur.fetchall()
+        limited = raw[:max_rows]
+        rows = []
+        for r in limited:
+            rows.append([v if isinstance(v, (str, int, float, type(None))) else str(v) for v in r])
+        return {
+            "instance_id": spec.instance_id,
+            "columns": cols,
+            "rows": rows,
+            "truncated": len(raw) > len(limited),
+        }
     finally:
         conn.close()
 
@@ -117,6 +146,20 @@ def precheck_change_window(url: str, dialect: str | None = None, long_tx_seconds
     """变更窗口前置检查：长事务、复制延迟、关键参数。输出 go / no-go 结论。"""
     spec = ConnectionSpec(url)
     d = dialect or spec.driver
+    if d == "sqlite":
+        # SQLite 为嵌入式/文件型数据库，无长事务、复制延迟、在线 DDL 等实例级指标，
+        # 这些检查天然不适用，明确跳过而不是假装检查通过。
+        return {
+            "instance_id": spec.instance_id,
+            "checks": [{
+                "name": "sqlite 变更窗口",
+                "value": None,
+                "status": "unknown",
+                "advice": "SQLite 为嵌入式/文件型数据库，无长事务、复制延迟、在线 DDL 等实例级指标，跳过变更窗口检查",
+            }],
+            "go": True,
+            "verdict": "SQLite 为嵌入式数据库，无实例级变更窗口检查，已跳过（仍建议先在事务内 dry-run 验证）",
+        }
     checks: list[dict] = []
 
     def _scalar(sql: str) -> float | None:
@@ -216,12 +259,19 @@ def explain(url: str, sql: str, dialect: str | None = None, analyze: bool = Fals
     spec = ConnectionSpec(url)
     d = dialect or spec.driver
     assert_readonly(sql, d)
-    plan = run_readonly(url, ("EXPLAIN ANALYZE " if analyze else "EXPLAIN ") + sql.rstrip(";"), d, max_rows=200)
+    if spec.driver == "sqlite":
+        prefix = "EXPLAIN QUERY PLAN "
+    else:
+        prefix = "EXPLAIN ANALYZE " if analyze else "EXPLAIN "
+    plan = run_readonly(url, prefix + sql.rstrip(";"), d, max_rows=200)
     flat = " | ".join(" ".join("" if c is None else str(c) for c in row) for row in plan["rows"])
     issues: list[str] = []
     low = flat.lower()
-    if "seq scan" in low or "using filesort" in low or "using temporary" in low or "full scan" in low:
+    if "seq scan" in low or "using filesort" in low or "using temporary" in low:
         issues.append("执行计划含全表扫描 / filesort / 临时表，需结合数据量判断是否可接受")
+    # SQLite 用 SCAN 表示全表扫描（SEARCH 表示走了索引）
+    if "scan" in low and "search" not in low:
+        issues.append("执行计划为全表扫描（SCAN），需结合数据量判断是否需要建索引")
     if "rows=0" in low.replace(" ", ""):
         issues.append("估算行数为 0，统计信息可能过期，建议先收集统计信息再判断")
     plan["plan_text"] = flat[:4000]
@@ -274,10 +324,10 @@ def run_in_transaction(
 
     conn = _connect(spec)
     try:
-        with conn.cursor() as cur:
-            if spec.driver == "postgres":
-                cur.execute("SET LOCAL statement_timeout = %s", (timeout * 1000,))
-            for i, st in enumerate(statements, 1):
+        cur = conn.cursor()
+        if spec.driver == "postgres":
+            cur.execute("SET LOCAL statement_timeout = %s", (timeout * 1000,))
+        for i, st in enumerate(statements, 1):
                 t0 = time.time()
                 try:
                     cur.execute(st)
