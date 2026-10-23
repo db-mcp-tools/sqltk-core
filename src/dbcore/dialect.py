@@ -170,6 +170,25 @@ def line_of(node: exp.Expression | None) -> int | None:
     return None
 
 
+def col_of(node: exp.Expression | None) -> int | None:
+    """取源码列号：与 line_of 对称，缺失时向下找最近的带 meta 的子节点。
+
+    用于评测关注的「问题定位到行 + 列」——把 finding 精确落到 token 位置。
+    """
+    if node is None:
+        return None
+    meta = getattr(node, "meta", None) or {}
+    col = meta.get("col")
+    if isinstance(col, int):
+        return col
+    for child in node.walk():
+        meta = getattr(child, "meta", None) or {}
+        col = meta.get("col")
+        if isinstance(col, int):
+            return col
+    return None
+
+
 def table_of(node: exp.Expression) -> str | None:
     tbl = node.find(exp.Table)
     if tbl is None:
