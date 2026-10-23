@@ -11,8 +11,9 @@ import os
 import re
 import time
 
-from dbcore.dialect import normalize_dialect
+from dbcore.dialect import CONNECTABLE, connector_status, normalize_dialect
 from dbcore.guard import assert_readonly, unsafe_in_transaction
+from dbcore.plan import plan_from_explain
 from dbcore.protocol import ToolError
 
 DEFAULT_TIMEOUT = int(os.environ.get("DBT_QUERY_TIMEOUT", "10"))
@@ -104,6 +105,13 @@ def _connect(spec: ConnectionSpec):
         except ImportError as e:
             raise MissingDriver("需要 psycopg：pip install \"psycopg[binary]\"") from e
 
+    if spec.driver not in CONNECTABLE:
+        st = connector_status(spec.driver)
+        if st["mode"] == "review-only":
+            raise ValueError(
+                f"{spec.driver} 目前支持 SQL 静态审查（review-only），尚未实现连接后端；"
+                f"当前可连接方言：{', '.join(sorted(CONNECTABLE))}"
+            )
     raise ValueError(f"暂不支持的连接类型：{spec.driver}")
 
 
@@ -254,8 +262,12 @@ def precheck_change_window(url: str, dialect: str | None = None, long_tx_seconds
     }
 
 
-def explain(url: str, sql: str, dialect: str | None = None, analyze: bool = False) -> dict:
-    """取执行计划。EXPLAIN 本身只读，内部 SQL 也必须先过只读护栏。"""
+def explain(url: str, sql: str, dialect: str | None = None, analyze: bool = False,
+            table_rows: int | None = None) -> dict:
+    """取执行计划。EXPLAIN 本身只读，内部 SQL 也必须先过只读护栏。
+
+    table_rows 提供真实表行数时，大表全扫会被评为 high（否则只评 warn）。
+    """
     spec = ConnectionSpec(url)
     d = dialect or spec.driver
     assert_readonly(sql, d)
@@ -274,6 +286,16 @@ def explain(url: str, sql: str, dialect: str | None = None, analyze: bool = Fals
         issues.append("执行计划为全表扫描（SCAN），需结合数据量判断是否需要建索引")
     if "rows=0" in low.replace(" ", ""):
         issues.append("估算行数为 0，统计信息可能过期，建议先收集统计信息再判断")
+
+    # ---- P3：结构化计划 + 风险评级 + 缺失索引建议 ----
+    enriched = plan_from_explain(plan["rows"], plan["columns"], d,
+                                 sql=sql, table_rows=table_rows)
+    plan["plan"] = enriched                      # 归一化结构（flags / totals / nodes）
+    plan["risk_level"] = enriched["risk_level"]
+    plan["risk_issues"] = enriched["risk_issues"]
+    plan["plan_suggestions"] = enriched["suggestions"]
+    plan["estimated_rows"] = enriched.get("totals", {}).get("rows_examined")
+
     plan["plan_text"] = flat[:4000]
     plan["issues"] = issues
     plan["instance_id"] = spec.instance_id

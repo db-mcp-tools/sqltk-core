@@ -17,8 +17,17 @@ compare_plans 必须先把它们压成同一个结构，否则跨引擎无法比
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
+
+import sqlglot
+from sqlglot import exp
+
+from dbcore.dialect import normalize_dialect
+
+# 大表阈值：超过则全表扫描视为高风险（可用环境变量调整）
+LARGE_TABLE_ROWS = int(os.environ.get("DBT_LARGE_TABLE_ROWS", "100000"))
 
 # 公认的"坏味道"标记 -> 中文说明
 _FLAGS = {
@@ -189,8 +198,6 @@ def parse_postgres(plan: Any) -> dict:
         if isinstance(obj, dict):
             idx[0] += 1
             nid = f"{parent}.{idx[0]}" if parent else str(idx[0])
-            ct = obj.get("Actual Rows", obj.get("Plan Rows"))
-            rows = _i(ct)
             nodes.append({
                 "id": nid,
                 "operation": obj.get("Node Type", "unknown"),
@@ -218,7 +225,6 @@ def parse_postgres(plan: Any) -> dict:
             m = _PG_RE.match(line)
             if not m:
                 continue
-            depth = len(line) - len(line.lstrip(" ->"))
             op = m.group("op").strip()
             t = m.group("tbl").strip('"')
             extra = []
@@ -322,6 +328,42 @@ def parse_oracle(text: str) -> dict:
 # 统一入口
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# SQLite（EXPLAIN QUERY PLAN 文本）
+# --------------------------------------------------------------------------
+
+def _parse_sqlite(text: str) -> dict:
+    nodes: list[dict] = []
+    for i, line in enumerate((text or "").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        m = re.search(r"\b(SCAN|SEARCH)\s+(\S+)(?:\s+USING\s+(.+))?$", line, re.I)
+        if not m:
+            nodes.append({"id": str(i + 1), "operation": line, "table": None,
+                          "access_type": "other", "index": None, "possible_keys": [],
+                          "rows_examined": 0, "rows_produced": 0, "filtered": 100.0,
+                          "cost": 0.0, "extra": [line], "children": []})
+            continue
+        op, tbl, rest = m.group(1), m.group(2), m.group(3)
+        # SCAN -> ALL 让统一 flags 正确识别全表扫描；SEARCH -> RANGE（走了索引）
+        access = "ALL" if op.lower() == "scan" else "RANGE"
+        extra: list[str] = []
+        idx = None
+        if rest:
+            im = re.search(r"INDEX\s+(\S+)", rest, re.I)
+            if im:
+                idx = im.group(1).strip("`\"'")
+            extra.append(rest)
+        est = re.search(r"\(~(\d+)\s+rows\)", line, re.I)
+        rows = int(est.group(1)) if est else 0
+        nodes.append({"id": str(i + 1), "operation": op, "table": tbl.strip("`\"'"),
+                      "access_type": access, "index": idx, "possible_keys": [],
+                      "rows_examined": rows, "rows_produced": rows, "filtered": 100.0,
+                      "cost": 0.0, "extra": extra, "children": []})
+    return {"engine": "sqlite", "root": None, "nodes": nodes, "flags": {}, "totals": {}}
+
+
 _PARSERS = {
     "mysql": parse_mysql,
     "mariadb": parse_mysql,
@@ -330,6 +372,7 @@ _PARSERS = {
     "kingbase": parse_postgres,
     "oracle": parse_oracle,
     "dameng": parse_oracle,
+    "sqlite": _parse_sqlite,
 }
 
 
@@ -438,3 +481,144 @@ def diff_plans(before: dict, after: dict) -> dict:
         + (f"，代价 {cb:,.1f} → {ca:,.1f}" if cb or ca else "")
     )
     return gains
+
+
+# ==================================================================
+# 取数桥接 + 风险评级 + 缺失索引建议（P3）
+# ==================================================================
+
+def _rows_to_text(rows: list) -> str:
+    """把 run_readonly 返回的位置行压成多行文本（供文本型计划解析）。"""
+    lines: list[str] = []
+    for r in rows:
+        if isinstance(r, (list, tuple)):
+            lines.append(" ".join(str(c) for c in r if isinstance(c, str)))
+        elif isinstance(r, str):
+            lines.append(r)
+    return "\n".join(l for l in lines if l.strip())
+
+
+def _rows_to_dicts(rows: list, columns: list) -> list[dict]:
+    """位置行 + 列名 -> 字典行（供 mysql 字典型解析）。"""
+    cols = [str(c).lower() for c in columns]
+    out: list[dict] = []
+    for r in rows:
+        if isinstance(r, dict):
+            out.append(r)
+        elif isinstance(r, (list, tuple)):
+            out.append(dict(zip(cols, r)))
+    return out
+
+
+def plan_from_explain(rows: list, columns: list, dialect: str,
+                      sql: str | None = None, table_rows: int | None = None) -> dict:
+    """把一次实时 EXPLAIN 的结果（run_readonly 的 rows/columns）归一化并补风险结论。
+
+    这是 `connectors.explain()` 与既有 `normalize_plan` 的桥接：自动按方言选择
+    文本 / 字典两种解析路径，并叠加 table_rows 驱动的风险分级与缺失索引建议。
+    返回 dict 在 normalize_plan 结果之上增加 risk_level / risk_issues / suggestions。
+    """
+    d = normalize_dialect(dialect)
+    if d == "sqlite":
+        norm = normalize_plan(_rows_to_text(rows), "sqlite")
+    elif d == "mysql":
+        norm = normalize_plan(_rows_to_dicts(rows, columns), "mysql")
+    elif d == "postgres":
+        norm = normalize_plan(_rows_to_text(rows), "postgres")
+    else:
+        # 其它方言退化按 mysql 字典型尝试
+        norm = normalize_plan(_rows_to_dicts(rows, columns), "mysql")
+
+    risk = grade_risk(norm, table_rows)
+    suggestions: list[str] = []
+    if sql:
+        try:
+            ast = sqlglot.parse_one(sql, read=d)
+        except Exception:
+            ast = None
+        if ast is not None:
+            suggestions = suggest_missing_index(norm.get("nodes", []), ast)
+    out = dict(norm)
+    out["risk_level"] = risk
+    out["risk_issues"] = norm.get("risk_issues", [])
+    out["suggestions"] = suggestions
+    return out
+
+
+def grade_risk(norm: dict, table_rows: int | None = None) -> str:
+    """按 flags + 表行数给风险定级：ok / warn / high。"""
+    flags = norm.get("flags") or {}
+    issues: list[str] = []
+    level = 0
+    if flags.get("full_scan"):
+        if table_rows is None:
+            level = max(level, 1)
+            issues.append("存在全表扫描但未提供表行数，无法判断风险（建议结合数据量评估）")
+        elif table_rows >= LARGE_TABLE_ROWS:
+            level = max(level, 2)
+            issues.append(f"大表（约 {table_rows:,} 行）全表扫描，随数据增长会越来越慢")
+        else:
+            issues.append("全表扫描（小表可接受），若数据会增长建议加索引")
+    if flags.get("filesort") or flags.get("temp_table"):
+        bump = 2 if (table_rows or 0) >= LARGE_TABLE_ROWS else 1
+        level = max(level, bump)
+        issues.append("执行计划含 filesort / 临时表：排序或分组未走索引")
+    if flags.get("bad_filtered"):
+        level = max(level, 1)
+        issues.append("存储引擎返回大量行后被 server 层过滤（索引选择性差）")
+    norm["risk_issues"] = issues
+    return {0: "ok", 1: "warn", 2: "high"}[level]
+
+
+def _predicate_columns(ast) -> tuple[dict[str, set], set]:
+    """取 WHERE / JOIN ON 里的谓词列：{限定表: {列}} 与 无限定列集合。
+
+    会把列的表别名解析成真实表名（FROM a x JOIN b y → x/y 映射到 a/b），
+    缺失索引建议才好落到正确的表上。
+    """
+    alias: dict[str, str] = {}
+    for tbl in ast.find_all(exp.Table):
+        if tbl.alias:
+            alias[tbl.alias] = tbl.name
+    qual: dict[str, set] = {}
+    unqual: set[str] = set()
+    for node in ast.walk():
+        if isinstance(node, (exp.Where, exp.Join)):
+            for col in node.find_all(exp.Column):
+                nm = col.name
+                if not nm:
+                    continue
+                if col.table:
+                    real = alias.get(col.table, col.table)
+                    qual.setdefault(real, set()).add(nm)
+                else:
+                    unqual.add(nm)
+    return qual, unqual
+
+
+def suggest_missing_index(nodes: list[dict], ast) -> list[str]:
+    """对全扫步骤，用 WHERE/ON 谓词列给出 CREATE INDEX 建议（保守、去重）。"""
+    scan = [n for n in nodes
+            if str(n.get("access_type") or "").upper() in ("ALL", "SEQ", "SCAN")
+            and not n.get("index") and n.get("table")]
+    if not scan:
+        return []
+    qual, unqual = _predicate_columns(ast)
+    suggestions: list[str] = []
+    seen: set[tuple] = set()
+    single = len(scan) == 1
+    for n in scan:
+        table = n["table"]
+        cols = set(qual.get(table, set()))
+        if single:
+            cols |= unqual
+        cols = sorted(c for c in cols if c)[:4]
+        if not cols:
+            continue
+        key = (table, tuple(cols))
+        if key in seen:
+            continue
+        seen.add(key)
+        idx = "idx_%s_%s" % (table.replace(".", "_"), "_".join(cols))
+        suggestions.append("CREATE INDEX %s ON %s (%s);" % (idx, table, ", ".join(cols)))
+    return suggestions

@@ -9,30 +9,76 @@ import sqlglot
 from sqlglot import exp
 
 _ALIASES = {
+    # ---- PostgreSQL 家族 ----
     "pg": "postgres",
     "postgresql": "postgres",
     "postgres": "postgres",
     "pgsql": "postgres",
+    "gaussdb": "postgres",
+    "opengauss": "postgres",
+    "kingbase": "postgres",
+    "redshift": "redshift",
+    "materialize": "materialize",
+    "risingwave": "risingwave",
+    # ---- MySQL 家族（协议/语法兼容系直接归一到 mysql，复用全部 MySQL 规则）----
     "mysql": "mysql",
     "mariadb": "mysql",
     "tidb": "mysql",
-    "oracle": "oracle",
-    "ora": "oracle",
-    "clickhouse": "clickhouse",
-    "ck": "clickhouse",
-    "sqlite": "sqlite",
-    "dameng": "oracle",
-    "dm": "oracle",
     "oceanbase": "mysql",
     "ob": "mysql",
     "polardb": "mysql",
     "goldendb": "mysql",
-    "gaussdb": "postgres",
-    "opengauss": "postgres",
-    "kingbase": "postgres",
+    "doris": "mysql",
+    "starrocks": "mysql",
+    # ---- Oracle 家族 ----
+    "oracle": "oracle",
+    "ora": "oracle",
+    "dameng": "oracle",
+    "dm": "oracle",
+    # ---- 其它独立方言（sqlglot 原生支持，review-only）----
+    "clickhouse": "clickhouse",
+    "ck": "clickhouse",
+    "sqlite": "sqlite",
+    "sqlserver": "tsql",
+    "mssql": "tsql",
+    "tsql": "tsql",
+    "bigquery": "bigquery",
+    "bq": "bigquery",
+    "snowflake": "snowflake",
+    "hive": "hive",
+    "spark": "spark",
+    "spark2": "spark2",
+    "databricks": "databricks",
+    "presto": "presto",
+    "trino": "trino",
+    "duckdb": "duckdb",
+    "teradata": "teradata",
+    "athena": "athena",
+    "dremio": "dremio",
+    "exasol": "exasol",
 }
 
-SUPPORTED = ("mysql", "postgres", "oracle", "clickhouse", "sqlite")
+SUPPORTED = (
+    "mysql", "postgres", "oracle", "clickhouse", "sqlite",
+    "tsql", "bigquery", "snowflake", "hive", "spark", "spark2",
+    "databricks", "presto", "trino", "redshift", "duckdb",
+    "teradata", "athena", "materialize", "risingwave", "dremio", "exasol",
+)
+
+# 有真实连接后端的方言；其余 SUPPORTED 方言只做静态审查（review-only）
+CONNECTABLE = ("mysql", "postgres", "sqlite")
+
+
+def connector_status(dialect: str) -> dict:
+    """报出方言能力：review-only 还是可连接。上层工具用它给用户准确的能力边界。"""
+    d = normalize_dialect(dialect)
+    connectable = d in CONNECTABLE
+    return {
+        "dialect": d,
+        "connectable": connectable,
+        "mode": "connectable" if connectable else "review-only",
+        "driver": {"mysql": "PyMySQL", "postgres": "psycopg", "sqlite": "stdlib sqlite3"}.get(d),
+    }
 
 
 def normalize_dialect(name: str | None) -> str:
