@@ -130,7 +130,9 @@ def run_readonly(url: str, sql: str, dialect: str | None = None, max_rows: int =
         cur = conn.cursor()
         if spec.driver == "postgres":
             cur.execute("SET TRANSACTION READ ONLY")
-            cur.execute("SET LOCAL statement_timeout = %s", (DEFAULT_TIMEOUT * 1000,))
+            # Postgres 的 SET 不接受服务端参数绑定（$1），psycopg3 会因此报错；
+            # timeout 是受控整数常量，直接内联字面量以兼容 psycopg2/psycopg3。
+            cur.execute(f"SET LOCAL statement_timeout = {int(DEFAULT_TIMEOUT * 1000)}")
         cur.execute(sql)
         if cur.description is None:
             return {"instance_id": spec.instance_id, "columns": [], "rows": [], "truncated": False}
@@ -348,7 +350,8 @@ def run_in_transaction(
     try:
         cur = conn.cursor()
         if spec.driver == "postgres":
-            cur.execute("SET LOCAL statement_timeout = %s", (timeout * 1000,))
+            # 同上：SET 不接受参数绑定，内联字面量兼容 psycopg2/psycopg3
+            cur.execute(f"SET LOCAL statement_timeout = {int(timeout * 1000)}")
         for i, st in enumerate(statements, 1):
                 t0 = time.time()
                 try:
