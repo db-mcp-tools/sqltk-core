@@ -44,10 +44,10 @@ oracle = ["oracledb>=2.0"]
 all = ["mcp>=1.0", "pymysql>=1.1", "psycopg[binary]>=3.1", "oracledb>=2.0"]
 
 [project.urls]
-Homepage = "https://github.com/Apollo-lwx/sqltk-core"
-Repository = "https://github.com/Apollo-lwx/sqltk-core"
-Issues = "https://github.com/Apollo-lwx/sqltk-core/issues"
-Changelog = "https://github.com/Apollo-lwx/db-ai-toolchain/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/db-mcp-tools/sqltk-core"
+Repository = "https://github.com/db-mcp-tools/sqltk-core"
+Issues = "https://github.com/db-mcp-tools/sqltk-core/issues"
+Changelog = "https://github.com/db-mcp-tools/db-ai-toolchain/blob/master/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]
